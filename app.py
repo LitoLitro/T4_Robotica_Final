@@ -10,6 +10,14 @@ ruta = []
 contador_img = 0
 os.makedirs("rostros_detectados", exist_ok=True)
 
+# MOVIMIENTO CONTINUO
+movimiento_continuo = {
+    "activo": False,
+    "cmd": None,
+    "thread": None
+}
+movimiento_lock = threading.Lock()
+
 app = Flask(__name__)
 
 # CONFIGURACION ARDUINO
@@ -56,7 +64,7 @@ mapa["celdas_visitadas"].append({"x": CENTRO[0], "y": CENTRO[1]})
 PASO = 1
 
 def actualizar_mapa(cmd):
-    """Actualiza posicion y direccion del robot segun el comando enviado."""
+    
     import math
 
     x = mapa["pos_x"]
@@ -89,7 +97,34 @@ def actualizar_mapa(cmd):
     if not visitadas or visitadas[-1] != celda:
         visitadas.append(celda)
 
-# OPENCV
+def _hilo_movimiento_continuo():
+
+    while True:
+        with movimiento_lock:
+            activo = movimiento_continuo["activo"]
+            cmd    = movimiento_continuo["cmd"]
+        if not activo:
+            break
+        actualizar_mapa(cmd)
+        if arduino and cmd:
+            arduino.write((cmd + '\n').encode())
+            arduino.flush()
+        time.sleep(2)
+
+
+def iniciar_movimiento_continuo(cmd):
+    with movimiento_lock:
+        movimiento_continuo["activo"] = True
+        movimiento_continuo["cmd"]    = cmd
+    t = threading.Thread(target=_hilo_movimiento_continuo, daemon=True)
+    movimiento_continuo["thread"] = t
+    t.start()
+
+
+def detener_movimiento_continuo():
+    with movimiento_lock:
+        movimiento_continuo["activo"] = False
+        movimiento_continuo["cmd"]    = None
 
 camara = cv2.VideoCapture(0)
 
@@ -372,6 +407,76 @@ canvas {
     flex-shrink: 0;
 }
 
+/* ── Movimiento continuo ── */
+#estadoMovimiento {
+    display: inline-block;
+    margin-top: 8px;
+    padding: 5px 16px;
+    border-radius: 20px;
+    font-size: 14px;
+    font-weight: bold;
+    background: #e5e7eb;
+    color: #6b7280;
+    transition: background .3s, color .3s;
+}
+#estadoMovimiento.activo {
+    background: #dcfce7;
+    color: #16a34a;
+    animation: pulso 1.2s infinite;
+}
+@keyframes pulso {
+    0%,100% { opacity:1; }
+    50%      { opacity:.6; }
+}
+
+button.btn-stop {
+    background: #dc2626;
+}
+button.btn-stop:hover { background: #b91c1c; }
+
+/* ── Galería de capturas ── */
+.galeria-section {
+    margin-top: 30px;
+}
+
+.galeria-grid {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.galeria-card {
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 0 10px rgba(0,0,0,.1);
+    padding: 8px;
+    width: 160px;
+    text-align: center;
+}
+
+.galeria-card img {
+    width: 144px;
+    height: 108px;
+    object-fit: cover;
+    border-radius: 8px;
+    border: 1px solid #e5e7eb;
+}
+
+.galeria-card .cap-nombre {
+    font-size: 11px;
+    color: #6b7280;
+    margin-top: 5px;
+    word-break: break-all;
+}
+
+#sinCapturas {
+    color: #9ca3af;
+    font-style: italic;
+    margin-top: 8px;
+}
+
 </style>
 </head>
 <body>
@@ -391,19 +496,28 @@ canvas {
 
 <h2>Movimiento</h2>
 
-<button onclick="enviar('F')">↑</button><br>
-<button onclick="enviar('L')">←</button>
-<button onclick="enviar('S')">■</button>
-<button onclick="enviar('R')">→</button><br>
-<button onclick="enviar('B')">↓</button>
+<button onclick="enviarMovimiento('F')">↑</button><br>
+<button onclick="enviarMovimiento('L')">←</button>
+<button class="btn-stop" onclick="enviarStop()">■</button>
+<button onclick="enviarMovimiento('R')">→</button><br>
+<button onclick="enviarMovimiento('B')">↓</button>
+
+<div id="estadoMovimiento">Detenido</div>
 
 <h2>Cámara</h2>
 <button onclick="enviar('CL')">⟲</button>
 <button onclick="enviar('CR')">⟳</button>
 
-<!-- ══════════════════════════════════ -->
-<!--            MAPA / CROQUIS         -->
-<!-- ══════════════════════════════════ -->
+<!--  Ultimas 5 capturas personas   -->
+
+<div class="galeria-section">
+    <h2>Últimas 5 Capturas</h2>
+    <div id="galeriaGrid" class="galeria-grid">
+        <span id="sinCapturas">Aún no hay capturas</span>
+    </div>
+</div>
+
+<!-- Mapa -->
 
 <h2>Croquis de Exploración</h2>
 
@@ -430,12 +544,32 @@ canvas {
 
 <script>
 
-// ─────────────────────────────────────
 //  SENSORES Y ESTADO
-// ─────────────────────────────────────
 
 function enviar(cmd) {
     fetch('/comando?cmd=' + cmd);
+}
+
+//  MOVIMIENTO CONTINUO
+
+let movimientoActivo = false;
+
+function enviarMovimiento(cmd) {
+    // Parar cualquier intervalo local previo
+    movimientoActivo = true;
+    fetch('/comando?cmd=' + cmd);
+    let etiqueta = cmd === 'F' ? '▲ Avanzando...' : '▼ Retrocediendo...';
+    let el = document.getElementById('estadoMovimiento');
+    el.textContent = etiqueta;
+    el.classList.add('activo');
+}
+
+function enviarStop() {
+    movimientoActivo = false;
+    fetch('/comando?cmd=S');
+    let el = document.getElementById('estadoMovimiento');
+    el.textContent = 'Detenido';
+    el.classList.remove('activo');
 }
 
 function actualizar() {
@@ -461,9 +595,30 @@ function actualizar() {
 setInterval(actualizar, 1000);
 actualizar();
 
-// ─────────────────────────────────────
+//  GALERÍA DE CAPTURAS
+
+function actualizarGaleria() {
+    fetch('/capturas')
+    .then(r => r.json())
+    .then(capturas => {
+        let grid = document.getElementById('galeriaGrid');
+        if (capturas.length === 0) {
+            grid.innerHTML = '<span id="sinCapturas">Aún no hay capturas</span>';
+            return;
+        }
+        grid.innerHTML = capturas.map(c => `
+            <div class="galeria-card">
+                <img src="data:image/jpeg;base64,${c.data}" alt="${c.nombre}">
+                <div class="cap-nombre">${c.nombre}</div>
+            </div>
+        `).join('');
+    });
+}
+
+setInterval(actualizarGaleria, 3000);
+actualizarGaleria();
+
 //  MAPA
-// ─────────────────────────────────────
 
 const canvas = document.getElementById("mapaCanvas");
 const ctx    = canvas.getContext("2d");
@@ -498,14 +653,14 @@ function dibujarMapa(mapaData) {
     const cy        = mapaData.pos_y;
     const dir       = mapaData.dir;
 
-    // Celda inicial (amarillo)
+    // Celda inicial 
     if (visitadas.length > 0) {
         let ini = visitadas[0];
         ctx.fillStyle = "#fde68a";
         ctx.fillRect(celdaAPx(ini.x) + 1, celdaAPx(ini.y) + 1, CELDA - 2, CELDA - 2);
     }
 
-    // Camino recorrido (azul claro)
+    // Camino recorrido
     ctx.fillStyle = "#bfdbfe";
     for (let i = 1; i < visitadas.length; i++) {
         let v = visitadas[i];
@@ -524,7 +679,7 @@ function dibujarMapa(mapaData) {
         ctx.stroke();
     }
 
-    // Personas detectadas (circulo rojo con numero)
+    // Personas detectadas 
     personas.forEach((p, idx) => {
         let px = celdaAPx(p.x) + CELDA / 2;
         let py = celdaAPx(p.y) + CELDA / 2;
@@ -606,7 +761,6 @@ setInterval(actualizarMapa, 1000);
 </html>
 """
 
-# RUTAS
 
 @app.route('/')
 def index():
@@ -633,17 +787,56 @@ def sensores():
 def comando():
     cmd = request.args.get('cmd')
 
+    if cmd == 'S':
+
+        detener_movimiento_continuo()
+        if arduino:
+            arduino.write(('S\n').encode())
+            arduino.flush()
+        return "OK"
+
+    if cmd in ('F', 'B'):
+
+        detener_movimiento_continuo()
+
+        time.sleep(0.05)  
+        actualizar_mapa(cmd)
+
+        if arduino:
+            arduino.write((cmd + '\n').encode())
+            arduino.flush()
+        iniciar_movimiento_continuo(cmd)
+        return "OK"
+
+
     if arduino and cmd:
         print("ENVIANDO:", cmd)
         arduino.write((cmd + '\n').encode())
         arduino.flush()
 
-    if cmd in ('F', 'B', 'L', 'R'):
+    if cmd in ('L', 'R'):
         actualizar_mapa(cmd)
 
     return "OK"
 
-@app.route('/mapa')
+@app.route('/capturas')
+def get_capturas():
+
+    import glob, base64
+
+    archivos = sorted(glob.glob("rostros_detectados/*.jpg"), key=os.path.getmtime, reverse=True)
+    ultimas  = archivos[:5]
+    resultado = []
+
+    for ruta_img in ultimas:
+        with open(ruta_img, "rb") as f:
+            datos_b64 = base64.b64encode(f.read()).decode()
+        nombre = os.path.basename(ruta_img)
+        resultado.append({"nombre": nombre, "data": datos_b64})
+    return jsonify(resultado)
+
+
+
 def get_mapa():
     return jsonify({
         "pos_x":            mapa["pos_x"],
